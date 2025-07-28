@@ -1,0 +1,46 @@
+# Arquivos de sistema
+.DS_Store
+Thumbs.db
+
+# Arquivos de IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Arquivos de build
+main
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Arquivos de teste
+*.test
+*.out
+
+# Arquivos de log
+logs/
+*.log
+
+# Arquivos de ambiente
+.env
+.env.local
+.env.production
+
+# Arquivos Git
+.git/
+.gitignore
+
+# Arquivos Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Arquivos de documentação
+README.md
+*.md
+
+# Arquivos temporários
+tmp/
+temp/ 

@@ -36,4 +36,12 @@ datasources:
     url: http://prometheus:9090
     jsonData:
       timeInterval: 15s
-    uid: prometheus 
+    uid: prometheus
+
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      maxLines: 1000
+    uid: loki 

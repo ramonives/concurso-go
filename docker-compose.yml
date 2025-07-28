@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: concurso-go-app
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    networks:
+      - dev-network
+    volumes:
+      - /home/b2b-dev/projetos/concurso-go-app/logs:/app/logs
+
+networks:
+  dev-network:
+    external: true 

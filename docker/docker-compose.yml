@@ -76,6 +76,32 @@ services:
     networks:
       - concurso-go
 
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: concurso_loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./loki-config.yaml:/etc/loki/local-config.yaml
+      - loki-data:/loki
+    networks:
+      - concurso-go
+
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: concurso_promtail
+    volumes:
+      - ./promtail-config.yaml:/etc/promtail/config.yml
+      - /var/log:/var/log
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - concurso-go
+    depends_on:
+      - loki
+
   grafana:
     image: grafana/grafana:10.0.0
     container_name: concurso_grafana
@@ -96,11 +122,13 @@ services:
     depends_on:
       - tempo
       - prometheus
+      - loki
 
 volumes:
   tempo-data:
   grafana-data:
   prometheus-data:
+  loki-data:
 
 networks:
   concurso-go: 
