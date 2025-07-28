@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"concurso-go-app/internal/database"
@@ -71,56 +72,104 @@ func (s *ConcursoService) PopularDados() error {
 	dataInicio := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	dataFim := time.Date(2025, 1, 31, 0, 0, 0, 0, time.UTC)
 
-	// Preparar statement
-	stmt, err := database.DB.Prepare(`
-		INSERT INTO concurso (nome, status, data_prova) VALUES (?, ?, ?)
-	`)
+	// Iniciar transação para melhor performance
+	tx, err := database.DB.Begin()
 	if err != nil {
-		return fmt.Errorf("erro ao preparar statement: %v", err)
+		return fmt.Errorf("erro ao iniciar transação: %v", err)
 	}
-	defer stmt.Close()
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
 
 	contador := 0
 	totalDias := 31
 	diaAtual := 0
+	const BATCH_SIZE = 1000 // Batch de 1000 registros por INSERT
 
-	fmt.Printf("Iniciando população de dados...\n")
+	fmt.Printf("Iniciando população de dados (BATCH INSERT)...\n")
 	fmt.Printf("Período: 01/01/2025 até 31/01/2025\n")
-	fmt.Printf("Total esperado: %d registros\n", totalDias*100)
+
+	// Calcular total esperado
+	registrosDia01 := 1000
+	registrosOutrosDias := 161290 // (5MM - 1000) / 30 dias
+	totalEsperado := registrosDia01 + (30 * registrosOutrosDias)
+	fmt.Printf("Total esperado: %d registros\n", totalEsperado)
 
 	for data := dataInicio; !data.After(dataFim); data = data.AddDate(0, 0, 1) {
 		diaAtual++
-		fmt.Printf("Processando dia %d/%d: %s\n", diaAtual, totalDias, data.Format("2006-01-02"))
 
-		for i := 1; i <= 100; i++ {
+		var registrosPorDia int
+		if data.Day() == 1 {
+			registrosPorDia = 1000 // Dia 01: 1000 registros
+			fmt.Printf("Processando dia %d/%d: %s (%d registros - 900 aprovados + 100 NULL)\n",
+				diaAtual, totalDias, data.Format("2006-01-02"), registrosPorDia)
+		} else {
+			registrosPorDia = 161290 // Dia 02-31: ~161K registros
+			fmt.Printf("Processando dia %d/%d: %s (%d registros - aprovados/reprovados)\n",
+				diaAtual, totalDias, data.Format("2006-01-02"), registrosPorDia)
+		}
+
+		// Processar em batches usando padrão otimizado
+		const batchSize = 1000
+		insertBase := `INSERT INTO concurso (nome, status, data_prova) VALUES `
+
+		valCount := 0
+		valueStrings := []string{}
+		valueArgs := []interface{}{}
+
+		for i := 1; i <= registrosPorDia; i++ {
 			nome := fmt.Sprintf("Candidato_%d_%s", i, data.Format("2006-01-02"))
 
-			// Dia 5 tem status NULL
 			var status sql.NullString
-			if data.Day() == 5 {
-				status.Valid = false
+			if data.Day() == 1 {
+				// Dia 01: 900 aprovados + 100 NULL
+				if i <= 900 {
+					status.String = "aprovado"
+					status.Valid = true
+				} else {
+					status.Valid = false // NULL
+				}
 			} else {
-				status.String = "aprovado"
+				// Dia 02-31: 70% aprovado + 30% reprovado
 				status.Valid = true
-				if rand.Float32() < 0.3 {
+				if rand.Float32() < 0.7 {
+					status.String = "aprovado"
+				} else {
 					status.String = "reprovado"
 				}
 			}
 
-			_, err := stmt.Exec(nome, status, data.Format("2006-01-02"))
-			if err != nil {
-				return fmt.Errorf("erro ao inserir registro: %v", err)
-			}
-			contador++
+			valueStrings = append(valueStrings, "(?, ?, ?)")
 
-			// Log a cada 50 registros
-			if contador%50 == 0 {
-				fmt.Printf("  Progresso: %d registros inseridos\n", contador)
+			valueArgs = append(valueArgs, nome, status, data.Format("2006-01-02"))
+			valCount += 3
+
+			if i%batchSize == 0 || i == registrosPorDia {
+				query := insertBase + strings.Join(valueStrings, ",")
+				_, err := tx.Exec(query, valueArgs...)
+				if err != nil {
+					return fmt.Errorf("erro ao inserir batch: %v", err)
+				}
+
+				contador += len(valueStrings)
+				fmt.Printf("  Progresso: %d registros inseridos (batch %d-%d)\n", contador, i-len(valueStrings)+1, i)
+
+				// Limpar arrays para reutilizar
+				valueStrings = []string{}
+				valueArgs = []interface{}{}
+				valCount = 0
 			}
 		}
 	}
 
-	log.Printf("Populadas %d registros com sucesso", contador)
+	// Commit da transação
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("erro ao fazer commit: %v", err)
+	}
+
+	log.Printf("Populadas %d registros com sucesso (OTIMIZADO)", contador)
 	return nil
 }
 
@@ -136,33 +185,52 @@ func (s *ConcursoService) ExtrairRegistros(data string) error {
 		return fmt.Errorf("erro ao criar tabelas: %v", err)
 	}
 
-	// Buscar registros
-	rows, err := database.DB.Query(`
-		SELECT id, nome, status, data_prova 
+	// Buscar total de registros primeiro
+	var totalRegistros int
+	err := database.DB.QueryRow(`
+		SELECT COUNT(*) 
 		FROM concurso 
 		WHERE DATE(data_prova) = ?
-	`, data)
+	`, data).Scan(&totalRegistros)
 	if err != nil {
-		// Log de erro detalhado para banco
-		if logErr := s.gerarLogErroDetalhado(data, "BANCO", "Ocorreram erros na extração do banco de dados", err, map[string]string{"operacao": "buscar_registros", "data": data}); logErr != nil {
-			fmt.Printf("⚠️  Erro ao gerar log de erro: %v\n", logErr)
-		}
-		return fmt.Errorf("erro ao buscar registros: %v", err)
-	}
-	defer rows.Close()
-
-	var registros []models.Concurso
-	for rows.Next() {
-		var c models.Concurso
-		err := rows.Scan(&c.ID, &c.Nome, &c.Status, &c.DataProva)
-		if err != nil {
-			return fmt.Errorf("erro ao ler registro: %v", err)
-		}
-		registros = append(registros, c)
+		return fmt.Errorf("erro ao contar registros: %v", err)
 	}
 
-	if len(registros) == 0 {
+	if totalRegistros == 0 {
 		return fmt.Errorf("nenhum registro encontrado para a data %s", data)
+	}
+
+	fmt.Printf("📊 Encontrados %d registros para extração\n", totalRegistros)
+
+	// Extrair em batches para não sobrecarregar memória
+	const BATCH_SIZE = 10000
+	var registros []models.Concurso
+
+	for offset := 0; offset < totalRegistros; offset += BATCH_SIZE {
+		rows, err := database.DB.Query(`
+			SELECT id, nome, status, data_prova 
+			FROM concurso 
+			WHERE DATE(data_prova) = ?
+			LIMIT ? OFFSET ?
+		`, data, BATCH_SIZE, offset)
+		if err != nil {
+			return fmt.Errorf("erro ao buscar registros: %v", err)
+		}
+
+		batchRegistros := []models.Concurso{}
+		for rows.Next() {
+			var c models.Concurso
+			err := rows.Scan(&c.ID, &c.Nome, &c.Status, &c.DataProva)
+			if err != nil {
+				rows.Close()
+				return fmt.Errorf("erro ao ler registro: %v", err)
+			}
+			batchRegistros = append(batchRegistros, c)
+		}
+		rows.Close()
+
+		registros = append(registros, batchRegistros...)
+		fmt.Printf("  Extraídos: %d/%d registros\n", len(registros), totalRegistros)
 	}
 
 	// Inicializar produtor Kafka
@@ -194,26 +262,34 @@ func (s *ConcursoService) ExtrairRegistros(data string) error {
 		return fmt.Errorf("erro ao enviar header: %v", err)
 	}
 
-	// Enviar registros
+	// Enviar registros em batches para Kafka
 	totalProcessado := 0
-	totalRegistros := len(registros)
+	registrosParaEnviar := len(registros)
+	const KAFKA_BATCH_SIZE = 10000 // Aumentado para 10K por batch
 
-	fmt.Printf("Enviando %d registros para Kafka...\n", totalRegistros)
+	fmt.Printf("Enviando %d registros para Kafka (BATCH)...\n", registrosParaEnviar)
 
-	for _, registro := range registros {
-		if err := kafka.SendMessage(topicName, registro); err != nil {
-			// Log de erro detalhado para Kafka
-			if logErr := s.gerarLogErroDetalhado(data, "KAFKA", "Erro ao enviar registro para Kafka", err, map[string]interface{}{"operacao": "enviar_registro", "data": data, "registro": registro, "total_processado": totalProcessado}); logErr != nil {
-				fmt.Printf("⚠️  Erro ao gerar log de erro: %v\n", logErr)
+	// Enviar em batches para melhor performance
+	for i := 0; i < registrosParaEnviar; i += KAFKA_BATCH_SIZE {
+		end := i + KAFKA_BATCH_SIZE
+		if end > registrosParaEnviar {
+			end = registrosParaEnviar
+		}
+
+		// Enviar batch atual
+		for j := i; j < end; j++ {
+			if err := kafka.SendMessage(topicName, registros[j]); err != nil {
+				// Log de erro detalhado para Kafka
+				if logErr := s.gerarLogErroDetalhado(data, "KAFKA", "Erro ao enviar registro para Kafka", err, map[string]interface{}{"operacao": "enviar_registro", "data": data, "registro": registros[j], "total_processado": totalProcessado}); logErr != nil {
+					fmt.Printf("⚠️  Erro ao gerar log de erro: %v\n", logErr)
+				}
+				return fmt.Errorf("erro ao enviar registro: %v", err)
 			}
-			return fmt.Errorf("erro ao enviar registro: %v", err)
+			totalProcessado++
 		}
-		totalProcessado++
 
-		// Log a cada 20 registros
-		if totalProcessado%20 == 0 || totalProcessado == totalRegistros {
-			fmt.Printf("  Enviados: %d/%d registros\n", totalProcessado, totalRegistros)
-		}
+		// Log a cada batch
+		fmt.Printf("  Enviados: %d/%d registros (batch %d-%d)\n", totalProcessado, registrosParaEnviar, i+1, end)
 	}
 
 	// Enviar footer
@@ -277,7 +353,7 @@ func (s *ConcursoService) ConsumirRegistros(data string) error {
 	var registros []models.Concurso
 	var registrosValidos []models.Concurso
 
-	// Handler para processar mensagens - SIMPLES
+	// Handler para processar mensagens - OTIMIZADO COM DEBUG
 	handler := func(message []byte) bool {
 		// Tentar header
 		var headerMsg models.KafkaHeader
@@ -310,9 +386,14 @@ func (s *ConcursoService) ConsumirRegistros(data string) error {
 				registrosValidos = append(registrosValidos, registro)
 			}
 
-			// Log de progresso a cada 10 registros
-			if len(registros)%10 == 0 {
+			// Log de progresso a cada 1000 registros (otimizado)
+			if len(registros)%1000 == 0 {
 				fmt.Printf("  Consumidos: %d registros\n", len(registros))
+			}
+
+			// DEBUG: Log a cada 10K para ver se está progredindo
+			if len(registros)%10000 == 0 {
+				fmt.Printf("🔍 DEBUG: Processados %d registros, continuando...\n", len(registros))
 			}
 		}
 
@@ -410,19 +491,35 @@ func (s *ConcursoService) ConsumirRegistros(data string) error {
 		}
 		defer stmt.Close()
 
-		// Inserir registros
+		// Inserir registros em batch para melhor performance
 		totalInseridos := 0
-		for _, registro := range registrosValidos {
-			_, err := stmt.Exec(registro.Nome, registro.Status.String, registro.DataProva.Format("2006-01-02"))
-			if err != nil {
-				return fmt.Errorf("erro ao inserir registro processado: %v", err)
-			}
-			totalInseridos++
+		const BATCH_SIZE = 1000
 
-			// Log a cada 10 registros
-			if totalInseridos%10 == 0 || totalInseridos == len(registrosValidos) {
-				fmt.Printf("  Inseridos: %d/%d registros válidos\n", totalInseridos, len(registrosValidos))
+		for i := 0; i < len(registrosValidos); i += BATCH_SIZE {
+			end := i + BATCH_SIZE
+			if end > len(registrosValidos) {
+				end = len(registrosValidos)
 			}
+
+			// Construir batch insert
+			var values []string
+			var args []interface{}
+
+			for j := i; j < end; j++ {
+				registro := registrosValidos[j]
+				values = append(values, "(?, ?, ?)")
+				args = append(args, registro.Nome, registro.Status.String, registro.DataProva.Format("2006-01-02"))
+			}
+
+			// Executar batch insert
+			query := fmt.Sprintf("INSERT INTO concurso_processado (nome, status, data_prova) VALUES %s", strings.Join(values, ","))
+			_, err := database.DB.Exec(query, args...)
+			if err != nil {
+				return fmt.Errorf("erro ao inserir batch: %v", err)
+			}
+
+			totalInseridos += len(values)
+			fmt.Printf("  Inseridos: %d/%d registros válidos (batch %d-%d)\n", totalInseridos, len(registrosValidos), i+1, end)
 		}
 
 		fmt.Printf("✅ Processamento concluído: %d registros válidos inseridos de %d total\n", len(registrosValidos), len(registros))

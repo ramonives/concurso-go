@@ -36,10 +36,9 @@ func ConsumeMessages(topic string, handler func([]byte) bool) error {
 	for message := range partitionConsumer.Messages() {
 		messageCount++
 
-		// Parar se processou muitas mensagens (proteção)
-		if messageCount > 10000 {
-			log.Printf("Limite de segurança atingido (%d mensagens), parando", messageCount)
-			break
+		// Log a cada 10K mensagens para debug
+		if messageCount%10000 == 0 {
+			log.Printf("Processadas %d mensagens, continuando...", messageCount)
 		}
 
 		if handler(message.Value) {
