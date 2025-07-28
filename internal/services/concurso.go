@@ -352,6 +352,7 @@ func (s *ConcursoService) ConsumirRegistros(data string) error {
 	var lote string // Será definido quando encontrar o header
 	var registros []models.Concurso
 	var registrosValidos []models.Concurso
+	var registrosComErro bool = false // Marca se há erro no lote
 
 	// Handler para processar mensagens - OTIMIZADO COM DEBUG
 	handler := func(message []byte) bool {
@@ -381,8 +382,13 @@ func (s *ConcursoService) ConsumirRegistros(data string) error {
 		if err := json.Unmarshal(message, &registro); err == nil {
 			registros = append(registros, registro)
 
-			// Validar status
-			if registro.Status.Valid && (registro.Status.String == "aprovado" || registro.Status.String == "reprovado") {
+			// Validar status - se inválido, marca para rejeitar todo o lote
+			if !registro.Status.Valid || (registro.Status.String != "aprovado" && registro.Status.String != "reprovado") {
+				// Encontrar registro inválido - marcar para rejeitar todo o lote
+				registrosValidos = nil  // Limpar registros válidos
+				registrosComErro = true // Marcar que há erro no lote
+			} else if !registrosComErro {
+				// Só adiciona se não há erro no lote
 				registrosValidos = append(registrosValidos, registro)
 			}
 
